@@ -145,16 +145,15 @@ function renderQuestionCard(q, opts = {}) {
 }
 
 function renderQuestionMaterial(q) {
-  const text = q.imageText ? `<pre class="q-image-text">${escapeHtml(q.imageText)}</pre>` : "";
+  if (q.imageText) return `<pre class="q-image-text">${escapeHtml(q.imageText)}</pre>`;
   const source = q.imageOriginal || q.image;
-  const original = source ? `<div class="q-image"><img src="${escapeHtml(source)}" alt="문제 원본 이미지" loading="lazy" /></div>` : "";
-  return text + original;
+  return source ? `<div class="q-image"><img src="${escapeHtml(source)}" alt="문제 원본 이미지" loading="lazy" /></div>` : "";
 }
 
 function buildAiPrompt(q, chosenIdx) {
   const choices = q.choices.map((choice, index) => `${index + 1}. ${choice}`).join("\n");
   const selected = chosenIdx ? `\n내가 선택한 답: ${chosenIdx}번` : "";
-  const image = q.image ? `\n참고 이미지: ${new URL(q.image, location.href).href}` : q.imageText ? `\n문제 자료:\n${q.imageText}` : "";
+  const image = q.imageText ? `\n문제 자료:\n${q.imageText}` : q.image ? `\n참고 이미지: ${new URL(q.image, location.href).href}` : "";
   return `리눅스마스터 2급 필기 문제를 풀고 있어. 아래 문제의 정답과 각 보기가 맞거나 틀린 이유를 초보자도 이해할 수 있게 설명해 줘.\n\n문제: ${q.question}${image}\n\n보기:\n${choices}${selected}`;
 }
 

@@ -147,7 +147,7 @@ function renderQuestionCard(q, opts = {}) {
 function renderQuestionMaterial(q) {
   const text = q.imageText ? `<pre class="q-image-text">${escapeHtml(q.imageText)}</pre>` : "";
   const source = q.imageOriginal || q.image;
-  const original = source ? `<details class="original-image"><summary>원본 이미지 확인</summary><div class="q-image"><img src="${escapeHtml(source)}" alt="문제 원본 이미지" loading="lazy" /></div></details>` : "";
+  const original = source ? `<div class="q-image"><img src="${escapeHtml(source)}" alt="문제 원본 이미지" loading="lazy" /></div>` : "";
   return text + original;
 }
 

@@ -1,0 +1,6 @@
+# Original Hangul documents are local-only source material (commercial CBT-site content).
+cbt/
+*.hwp
+*.hwpx
+node_modules/
+.DS_Store

@@ -45,141 +45,123 @@ function textSimilarity(a, b) {
   return 1 - d / len;
 }
 
-// 보기 순서가 회차마다 다를 수 있으므로, A의 각 보기를 B에서 가장 비슷한 보기와 짝지어
-// 평균 유사도를 낸다(순서 무관 비교).
-function choiceSetSimilarity(choicesA, choicesB) {
-  const normA = choicesA.map(normalizeText);
-  const normB = choicesB.map(normalizeText);
-  if (!normA.length) return 0;
-  const total = normA.reduce((sum, a) => sum + normB.reduce((max, b) => Math.max(max, textSimilarity(a, b)), 0), 0);
-  return total / normA.length;
+// 정답 텍스트가 실질적으로 같은지 판별한다.
+// 단축키([Ctrl]+[c] vs [Ctrl]+[z]), 숫자(포트/IP/시그널 번호), 짧은 명령어/옵션(csh vs tcsh, df vs du)은
+// 한 글자 차이로 완전히 다른 의미이므로 정확히 일치해야 하고,
+// 긴 인명/외래어("리처드 스톨먼" vs "리처드 스톨만") 등은 편집 거리 1 이내의 표기 차이를 허용한다.
+function isSameAnswer(ansA, ansB) {
+  const na = normalizeText(ansA);
+  const nb = normalizeText(ansB);
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  if (na.includes("ctrl") || nb.includes("ctrl")) return false;
+  if (/\d/.test(na) || /\d/.test(nb)) return na === nb;
+  if (na.length <= 5 || nb.length <= 5) return false;
+  const d = levenshtein(na, nb);
+  return d <= 1 && na.length >= 6;
 }
 
-function bestMatchIndex(target, list) {
-  let bestIdx = -1;
-  let best = -1;
-  list.forEach((item, i) => {
-    const s = textSimilarity(target, item);
-    if (s > best) { best = s; bestIdx = i; }
-  });
-  return bestIdx;
+// 두 문제가 실질적으로 같은 문제(재출제)인지 판별한다.
+// 1. 같은 회차의 문제는 중복으로 보지 않는다.
+// 2. 정답 내용이 실질적으로 같아야 한다.
+// 3. 지문(imageText)이 있는 경우 지문의 유사도를 함께 비교하고,
+//    텍스트 문제의 경우 문장 표현의 유사도를 유연하게 비교한다.
+function isSameQuestion(qa, qb) {
+  if (qa.round === qb.round) return false;
+
+  const ansA = (qa.choices || [])[qa.answer - 1] || "";
+  const ansB = (qb.choices || [])[qb.answer - 1] || "";
+  if (!isSameAnswer(ansA, ansB)) return false;
+
+  const nqa = qa._nq || normalizeText(qa.question);
+  const nqb = qb._nq || normalizeText(qb.question);
+
+  const hasItA = Boolean(qa.imageText);
+  const hasItB = Boolean(qb.imageText);
+
+  if (hasItA && hasItB) {
+    const itA = qa._nit || normalizeText(qa.imageText);
+    const itB = qb._nit || normalizeText(qb.imageText);
+    const itSim = textSimilarity(itA, itB);
+    const qSim = textSimilarity(nqa, nqb);
+    return itSim >= 0.65 || (qSim >= 0.85 && itSim >= 0.35);
+  }
+
+  if (!hasItA && !hasItB) {
+    const qSim = textSimilarity(nqa, nqb);
+    return qSim >= 0.68;
+  }
+
+  const it = qa._nit || qb._nit || normalizeText(qa.imageText || qb.imageText);
+  const qText = hasItA ? nqb : nqa;
+  return textSimilarity(it, qText) >= 0.65;
 }
 
-// bestMatchIndex는 아무리 약한 유사도라도 "그나마 가장 비슷한" 항목의 인덱스를 항상 돌려준다.
-// 보기가 셸/파일시스템/편집기 이름처럼 짧은 전문 용어일 때는 이게 오히려 함정이 된다.
-// 예를 들어 "csh"는 "tcsh"와 글자가 겨우 하나 달라 얼핏 비슷해 보이지만(유사도 0.75) 실제로는
-// 전혀 다른 셸이다. 그래서 정답이 정말 같은 항목을 가리키는지 확인할 때는 최소 유사도
-// 기준(ANSWER_MATCH_THRESHOLD)을 만족 못 하면 매칭 자체를 포기(-1)하도록 강화한 버전을 쓴다.
-const ANSWER_MATCH_THRESHOLD = 0.92;
+let _clusterCache = null;
+let _clusterCacheSource = null;
 
-function bestMatchIndexStrict(target, list) {
-  let bestIdx = -1;
-  let best = -1;
-  list.forEach((item, i) => {
-    const s = textSimilarity(target, item);
-    if (s > best) { best = s; bestIdx = i; }
-  });
-  return best >= ANSWER_MATCH_THRESHOLD ? bestIdx : -1;
-}
+// Disjoint-Set(Union-Find)을 이용해 전체 문제 은행을 유사 문제 클러스터로 그룹화한다.
+function getClusters(questions) {
+  if (_clusterCache && _clusterCacheSource === questions) return _clusterCache;
+  const n = questions.length;
+  const pre = questions.map((q) => ({
+    ...q,
+    _nq: normalizeText(q.question),
+    _nit: normalizeText(q.imageText || ""),
+  }));
 
-const NEAR_DUP_THRESHOLD = 0.7;
+  const parent = Array.from({ length: n }, (_, i) => i);
+  function find(i) { return parent[i] === i ? i : (parent[i] = find(parent[i])); }
+  function union(i, j) { parent[find(i)] = find(j); }
 
-// 오탈자/띄어쓰기/용어 표기만 살짝 다르게 재출제된 문제를 잡아낸다. 문제 문장이 완전히
-// 같은 것끼리만 비교해(우연히 같은 문장 틀을 재사용한 서로 다른 문제와 섞이지 않도록),
-// 보기 내용이 실질적으로 같고(threshold 이상) 정답 위치도 서로 대응할 때만 중복으로 본다.
-function dedupeNearMatches(questions) {
-  const groups = new Map();
-  questions.forEach((q) => {
-    const key = normalizeText(q.question);
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(q);
-  });
-
-  const drop = new Set();
-  groups.forEach((group) => {
-    if (group.length < 2) return;
-    for (let i = 0; i < group.length; i++) {
-      if (drop.has(group[i].id)) continue;
-      for (let j = i + 1; j < group.length; j++) {
-        if (drop.has(group[j].id)) continue;
-        const simScore = choiceSetSimilarity(group[i].choices || [], group[j].choices || []);
-        if (simScore < NEAR_DUP_THRESHOLD) continue;
-        const answerA = normalizeText((group[i].choices || [])[group[i].answer - 1] || "");
-        const matchIdx = bestMatchIndexStrict(answerA, (group[j].choices || []).map(normalizeText));
-        if (matchIdx !== group[j].answer - 1) continue; // 정답 위치가 안 맞으면 실제로는 다른 문제
-        drop.add(group[j].id);
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      if (isSameQuestion(pre[i], pre[j])) {
+        union(i, j);
       }
     }
-  });
+  }
 
-  return questions.filter((q) => !drop.has(q.id));
-}
+  const clusters = new Map();
+  for (let i = 0; i < n; i++) {
+    const root = find(i);
+    if (!clusters.has(root)) clusters.set(root, []);
+    clusters.get(root).push(questions[i]);
+  }
 
-// 동일/유사 문제를 하나의 그룹으로 묶어 출제 빈도를 계산한다.
-function groupByFrequency(questions) {
-  const groups = new Map();
-  questions.forEach((q) => {
-    const key = normalizeText(q.question);
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(q);
-  });
-  return groups;
-}
-
-// 문제 텍스트만 같다고 같은 문제로 보지 않는다. 특히 이미지에 실제 내용이 들어있고
-// 지문은 "다음 ( 괄호 ) 안에 들어갈 내용으로 알맞은 것은?"처럼 매우 일반적인 문제가 많아,
-// 텍스트만으로 묶으면 서로 전혀 다른 문제들이 하나의 "빈출문제"로 잘못 뭉쳐진다. 그래서
-// 텍스트가 같은 그룹 안에서도 보기 구성이 실질적으로 비슷하고(dedupeNearMatches와 동일한
-// 유사도 기준) 정답 위치까지 대응하는 것들끼리만 다시 소그룹으로 묶는다.
-function clusterByChoices(arr) {
-  const clusters = [];
-  arr.forEach((q) => {
-    const qAnswerText = normalizeText((q.choices || [])[q.answer - 1] || "");
-    const cluster = clusters.find((c) => {
-      const rep = c[0];
-      if (choiceSetSimilarity(q.choices || [], rep.choices || []) < NEAR_DUP_THRESHOLD) return false;
-      const repMatchIdx = bestMatchIndexStrict(qAnswerText, (rep.choices || []).map(normalizeText));
-      return repMatchIdx === rep.answer - 1;
-    });
-    if (cluster) cluster.push(q);
-    else clusters.push([q]);
-  });
+  _clusterCache = clusters;
+  _clusterCacheSource = questions;
   return clusters;
 }
 
+// 2회 이상 출제된 빈출 문제를 추출한다.
 function getFrequentQuestions(questions, minCount = 2) {
-  const groups = groupByFrequency(questions);
+  const clusters = getClusters(questions);
   const result = [];
-  groups.forEach((arr) => {
-    if (arr.length < minCount) return;
-    clusterByChoices(arr).forEach((cluster) => {
-      if (cluster.length < minCount) return;
-      const sorted = [...cluster].sort((a, b) => (a.round > b.round ? 1 : -1));
-      const rep = sorted[sorted.length - 1];
-      result.push({
-        ...rep,
-        freqCount: cluster.length,
-        freqRounds: [...new Set(cluster.map((a) => a.round))],
-      });
+  clusters.forEach((members) => {
+    const rounds = [...new Set(members.map((q) => q.round))];
+    if (rounds.length < minCount) return;
+    const sorted = [...members].sort((a, b) => (a.round > b.round ? 1 : -1));
+    const rep = sorted[sorted.length - 1];
+    result.push({
+      ...rep,
+      freqCount: rounds.length,
+      freqRounds: rounds,
     });
   });
   result.sort((a, b) => b.freqCount - a.freqCount);
   return result;
 }
 
-// 같은 문제가 여러 회차에 그대로 재출제된 경우(보기 순서만 다를 수 있음) 랜덤 모드에서
-// 한 번만 나오도록 걸러낸다. 빈출문제/회차별 모의고사는 회차별 원본 데이터가 그대로 있어야
-// 하므로 이 함수는 원본 배열을 바꾸지 않고 별도 목록만 만들어 반환한다.
+// 같은 문제가 여러 회차에 중복 출제된 경우 최신 1개만 남겨 랜덤 모드에서 중복 출제를 방지한다.
 function dedupeQuestions(questions) {
-  const seen = new Set();
-  const exact = [];
-  questions.forEach((q) => {
-    const key = normalizeText(q.question) + "|" + (q.choices || []).map(normalizeText).sort().join(",");
-    if (seen.has(key)) return;
-    seen.add(key);
-    exact.push(q);
+  const clusters = getClusters(questions);
+  const result = [];
+  clusters.forEach((members) => {
+    const sorted = [...members].sort((a, b) => (a.round > b.round ? 1 : -1));
+    result.push(sorted[sorted.length - 1]);
   });
-  return dedupeNearMatches(exact);
+  return result;
 }
 
 function getRounds(questions) {
